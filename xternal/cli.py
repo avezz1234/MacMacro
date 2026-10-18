@@ -90,6 +90,8 @@ def cmd_calibrate(args) -> int:
     for step in result.steps:
         print(f"  {step}")
         log.info("calibrate step: %s", step)
+    if result.debug:
+        log.debug("calibrate diagnostics:\n%s", "\n".join(result.debug), extra=FILE_ONLY)
     print()
 
     if not result.ok:

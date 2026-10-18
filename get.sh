@@ -42,10 +42,21 @@ main() {
         || die "Couldn't copy files into $DEST."
     chmod +x "$DEST/XTernal.command" "$DEST/xternal-mac" "$DEST/run.py" "$DEST/install.sh"
 
-    # A launcher on the Desktop that runs the real one from ~/XTernal.
+    # A launcher on the Desktop: fetches the newest get.sh (so every launch is
+    # also an update), falling back to the installed copy when offline.
     LAUNCHER="$HOME/Desktop/XTernal.command"
     if [ -d "$HOME/Desktop" ]; then
-        printf '#!/bin/bash\nexec bash "%s/XTernal.command"\n' "$DEST" > "$LAUNCHER"
+        cat > "$LAUNCHER" <<LAUNCH
+#!/bin/bash
+# XTernal launcher -- updates to the newest version, then starts it.
+NEW="\$(mktemp)"
+if curl -fsSL --max-time 20 "https://raw.githubusercontent.com/$REPO/$BRANCH/get.sh" -o "\$NEW" \\
+   && grep -q '^main "\$@"' "\$NEW"; then
+    exec bash "\$NEW"
+fi
+echo "(Couldn't check for updates -- starting the installed version.)"
+exec bash "$DEST/XTernal.command"
+LAUNCH
         chmod +x "$LAUNCHER"
     fi
 

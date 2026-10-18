@@ -156,6 +156,8 @@ class RobloxReader:
         """
         if not is_valid_user_pointer(instance):
             return "<null>"
+        if self.offsets.get("NameInline"):
+            return self.read_string(instance + self.offsets.get("Name")) or "<null>"
         name_ptr = self.ptr(instance + self.offsets.get("Name"))
         if not name_ptr:
             return "<null>"
@@ -171,7 +173,10 @@ class RobloxReader:
         cached = self._class_names.get(desc)
         if cached is not None:
             return cached
-        name_ptr = self.ptr(desc + self.offsets.get("ClassDescriptorToClassName"))
+        if self.offsets.get("ClassNameInline"):
+            name_ptr = desc + self.offsets.get("ClassDescriptorToClassName")
+        else:
+            name_ptr = self.ptr(desc + self.offsets.get("ClassDescriptorToClassName"))
         if not name_ptr:
             return "<unknown>"
         name = self.read_string(name_ptr)
@@ -182,27 +187,36 @@ class RobloxReader:
         return name
 
     def _children_raw(self, instance: int) -> bytes | None:
-        """The raw children array: 16-byte entries, child pointer first."""
+        """The raw children array; entries are ChildStride bytes, pointer first.
+
+        Children is either a pointer to a {begin, end} vector (Windows,
+        Android) or, with ChildrenInline, the {begin, end} pair itself.
+        """
         if not is_valid_user_pointer(instance):
             return None
-        list_ptr = self.ptr(instance + self.offsets.get("Children"))
-        if not list_ptr:
-            return None
-        bounds = self.mem.read(list_ptr, 16)
+        if self.offsets.get("ChildrenInline"):
+            bounds = self.mem.read(instance + self.offsets.get("Children"), 16)
+        else:
+            list_ptr = self.ptr(instance + self.offsets.get("Children"))
+            if not list_ptr:
+                return None
+            bounds = self.mem.read(list_ptr, 16)
         if bounds is None:
             return None
         start, end = struct.unpack("<QQ", bounds)
         if not start or not end or end <= start:
             return None
-        count = (end - start) // CHILD_ENTRY_SIZE
+        stride = self.offsets.get("ChildStride", CHILD_ENTRY_SIZE)
+        count = (end - start) // stride
         if count > MAX_CHILDREN:
             return None
-        return self.mem.read(start, count * CHILD_ENTRY_SIZE)
+        return self.mem.read(start, count * stride)
 
-    @staticmethod
-    def _unpack_children(raw: bytes) -> list[int]:
-        # Every other u64 is a child pointer; the rest is refcount bookkeeping.
-        return [c for c in memoryview(raw).cast("Q")[::2] if c]
+    def _unpack_children(self, raw: bytes) -> list[int]:
+        # With shared_ptr entries every other u64 is the child pointer; the
+        # rest is refcount bookkeeping.
+        step = self.offsets.get("ChildStride", CHILD_ENTRY_SIZE) // 8
+        return [c for c in memoryview(raw).cast("Q")[::step] if c]
 
     def read_children(self, instance: int) -> list[int]:
         """ReadChildren(): the children vector is {begin, end} behind one pointer."""

@@ -63,6 +63,10 @@ class MemoryAccessError(RuntimeError):
     """task_for_pid failed. The message says why, in plain words."""
 
 
+class RobloxRestarting(MemoryAccessError):
+    """The pid vanished mid-connect; not a real failure."""
+
+
 @dataclass(frozen=True)
 class Region:
     start: int
@@ -149,6 +153,11 @@ def open_task(pid: int) -> int:
         if port:
             return port
         kr, port = native.task_for_pid(pid)
+        if kr == native.KERN_SUCCESS and not port:
+            # Seen when Roblox restarts itself right after launch: the pid is
+            # on its way out. Transient; the watcher retries with the new pid.
+            raise RobloxRestarting(
+                "Roblox was restarting while connecting. Trying again in a moment.")
         if kr != native.KERN_SUCCESS or not port:
             raise MemoryAccessError(explain_task_failure(kr))
         # Drop rights for pids that are gone.

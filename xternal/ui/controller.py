@@ -397,7 +397,7 @@ class Controller:
             from ..diagnostics import roblox_bundle_info
             from ..memory.calibrate import calibrate as run_calibration
             from ..memory.offsets import save_calibrated_offsets
-            from ..memory.proc import MemoryAccessError, ProcessMemory
+            from ..memory.proc import MemoryAccessError, ProcessMemory, RobloxRestarting
 
             def progress(msg):
                 log.info("calibrate: %s", msg)
@@ -409,6 +409,9 @@ class Controller:
                 result = run_calibration(mem, place_id=cfg.FISCH_PLACE_ID, progress=progress)
                 for step in result.steps:
                     log.info("calibrate step: %s", step)
+                if result.debug:
+                    log.debug("calibrate diagnostics:\n%s", "\n".join(result.debug),
+                              extra=FILE_ONLY)
                 if result.ok and not result.offsets.has("PlaceId"):
                     # Found a DataModel, but it was the Roblox menu's, not
                     # Fisch's. A table built from that can't read the game.
@@ -422,6 +425,9 @@ class Controller:
                 else:
                     log.error("calibrate failed: %s", result.error)
                     self.events.put(("calib_failed", result.error))
+            except RobloxRestarting as exc:
+                log.info("calibrate: %s", exc)
+                self.events.put(("calib_not_in_game", True))
             except MemoryAccessError as exc:
                 log.error("calibrate: %s", exc)
                 self.events.put(("calib_failed", str(exc)))
