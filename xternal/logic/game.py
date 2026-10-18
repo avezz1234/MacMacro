@@ -21,7 +21,7 @@ import re
 import time
 
 from ..log import get_logger
-from ..memory.calibrate import locate_data_model
+from ..memory.calibrate import is_real_data_model, locate_data_model
 from ..memory.offsets import Offsets, load_calibrated_offsets
 from ..memory.proc import MemoryAccessError, ProcessMemory, find_client
 from ..memory.rbx import RobloxReader, is_valid_user_pointer
@@ -173,10 +173,7 @@ class GameLink:
         dm = r.get_data_model()
         if not is_valid_user_pointer(dm):
             return False
-        if r.read_class_name(dm) != "DataModel":
-            return False
-        classes = {r.read_class_name(c) for c in r.read_children(dm)}
-        return "Workspace" in classes and "Players" in classes
+        return is_real_data_model(r, r.offsets, dm)
 
     def status_text(self) -> str:
         """GetAttachStatusText(): what the UI shows about the connection."""

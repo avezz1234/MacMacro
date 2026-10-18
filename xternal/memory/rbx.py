@@ -177,6 +177,8 @@ class RobloxReader:
             name_ptr = desc + self.offsets.get("ClassDescriptorToClassName")
         else:
             name_ptr = self.ptr(desc + self.offsets.get("ClassDescriptorToClassName"))
+            if name_ptr:
+                name_ptr += self.offsets.get("ClassNameToString", 0)
         if not name_ptr:
             return "<unknown>"
         name = self.read_string(name_ptr)

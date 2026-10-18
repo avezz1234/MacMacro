@@ -60,6 +60,11 @@ CHILD_STRIDES = (0x10, 0x8)
 #: Give up on the layout search after this long rather than hang the UI.
 SOLVE_BUDGET_S = 90.0
 
+#: The descriptor's name pointer may land on a small block in front of the
+#: string instead of the string itself (the Linux port saw this for
+#: Instance.Name on newer builds). These are the distances tried.
+NAME_HOPS = (0x0, 0x8, 0x10, 0x18, 0x20)
+
 
 @dataclass
 class CalibrationResult:
@@ -82,6 +87,8 @@ class Calibrator:
         self._progress = progress
         self.abi = abi
         self._name_cache: dict[tuple, str] = {}
+        #: Every structurally verified DataModel candidate, for the log.
+        self.matches_log: list[str] = []
         #: Closest misses of the layout search: (score, description).
         self.near_misses: list[tuple[int, str]] = []
 
@@ -259,14 +266,19 @@ class Calibrator:
         # string stored inline in the descriptor itself (seen as a possibility
         # on macOS). Both are proposed; the structural test decides.
         self._say("Finding class descriptors...")
-        holders = self.find_qwords_in([(s, s + 1) for s in strings], limit=256)
+        holders = self.find_qwords_in(
+            [(s - max(NAME_HOPS), s + 1) for s in strings], limit=2048)
+        holders = [(h, v) for h, v in holders if self._hop_for(v, strings) is not None]
         result.log(f"descriptor name-field candidates: {len(holders)} pointer, "
                    f"{len(strings)} inline")
-        targets = [(h, False) for h, _ in holders] + [(s, True) for s in strings]
+        # (address, inline, hop): a pointer field at `address` reaching the
+        # string `hop` bytes past where it points, or the string itself inline.
+        targets = [(h, False, self._hop_for(v, strings)) for h, v in holders]
+        targets += [(s, True, 0) for s in strings]
 
         # Step 3 -- who points into those descriptors? Those are the Instances.
         self._say("Finding DataModel instances...")
-        windows = [(t - DESCRIPTOR_WINDOW, t + 8) for t, _ in targets]
+        windows = [(t - DESCRIPTOR_WINDOW, t + 8) for t, _, _ in targets]
         referrers = self.find_qwords_in(windows, limit=60000)
         result.log(f"instance class-descriptor field candidates: {len(referrers)}")
 
@@ -281,14 +293,18 @@ class Calibrator:
             )
             for score, text in sorted(self.near_misses, reverse=True)[:8]:
                 result.log(f"near miss ({score} names decoded): {text}")
+            for line in self.matches_log[:10]:
+                result.log(line)
             self._dump_failure(strings, holders, referrers, result)
             return result
 
+        for line in self.matches_log[:10]:
+            result.log(line)
         table, data_model = solution
         result.data_model = data_model
         result.log(f"DataModel @ {hex(data_model)}")
-        for key in ("ClassDescriptor", "ClassDescriptorToClassName", "Children",
-                    "ClassNameInline", "ChildrenInline", "ChildStride"):
+        for key in ("ClassDescriptor", "ClassDescriptorToClassName", "ClassNameToString",
+                    "Children", "ClassNameInline", "ChildrenInline", "ChildStride", "Parent"):
             if key in table:
                 result.log(f"{key} = {hex(table[key])}")
 
@@ -312,10 +328,12 @@ class Calibrator:
             return result
         result.log(f"Name = {hex(table['Name'])}" + (" (inline)" if table.get("NameInline") else ""))
 
-        # Step 6 -- Parent, pinned by a child pointing back at the DataModel.
-        self._say("Resolving Instance.Parent...")
-        if self._solve_parent(reader, table, data_model):
-            result.log(f"Parent = {hex(table['Parent'])}")
+        # Step 6 -- Parent, pinned by a child pointing back at the DataModel
+        # (normally already pinned by the layout search's verification).
+        if "Parent" not in table:
+            self._say("Resolving Instance.Parent...")
+            if self._solve_parent(reader, table, data_model):
+                result.log(f"Parent = {hex(table['Parent'])}")
 
         # Step 7 -- PlaceId, pinned by the known Fisch place id.
         if place_id:
@@ -355,19 +373,29 @@ class Calibrator:
 
     # -- step 4 -----------------------------------------------------------
 
+    @staticmethod
+    def _hop_for(value: int, strings) -> int | None:
+        """How far past `value` one of the class-name strings starts, if allowed."""
+        for st in strings:
+            hop = st - value
+            if hop in NAME_HOPS:
+                return hop
+        return None
+
     def _solve_instance_layout(self, targets, referrers, place_id: int = 0):
-        """Jointly solve ClassDescriptor / ClassName / Children.
+        """Jointly solve ClassDescriptor / ClassName / Children (+ Parent).
 
-        `targets` are (address, inline) name-field candidates: a pointer to the
-        class-name string, or the string itself inside the descriptor. Each
+        `targets` are (address, inline, hop) name-field candidates. Each
         (target, referrer) pair proposes a ClassName offset and a
-        ClassDescriptor offset, and a proposal is only accepted if some field
-        of the candidate object decodes as a child list whose members' class
-        names include both Workspace and Players -- TestOffsetsInMemory()'s
-        criterion.
+        ClassDescriptor offset. A proposal is accepted only if some field of
+        the candidate decodes as a child list holding Workspace and Players
+        *and* those two children point back at the candidate through a shared
+        Parent field. The second half matters: on macOS a class-name registry
+        (a hash table of name -> descriptor records) also "contains" Workspace
+        and Players, but nothing in it points back at a parent.
 
-        Real descriptors are shared by every instance of a class, so busier
-        referrer groups are tried first; random heap qwords are singletons.
+        Among verified matches, one holding the expected PlaceId wins;
+        otherwise the one with the most children (the game over the menu).
         """
         groups: dict[int, list[int]] = {}
         for referrer_addr, desc_addr in referrers:
@@ -376,17 +404,18 @@ class Calibrator:
 
         def rank(item):
             desc_addr, refs = item
-            best = min((t - desc_addr for t, _ in target_list if t >= desc_addr),
+            best = min((t - desc_addr for t, _, _ in target_list if t >= desc_addr),
                        default=1 << 30)
             return (-len(refs), best)
 
         deadline = time.monotonic() + SOLVE_BUDGET_S
-        fallback = None
+        matches: list[tuple[int, dict, int]] = []  # (children, table, instance)
+        seen_instances: set[int] = set()
         for desc_addr, refs in sorted(groups.items(), key=rank):
             if time.monotonic() > deadline:
                 self.near_misses.append((0, "search budget exhausted"))
                 break
-            for target, inline in target_list:
+            for target, inline, hop in target_list:
                 if not (desc_addr <= target < desc_addr + DESCRIPTOR_WINDOW + 8):
                     continue
                 class_name_off = target - desc_addr
@@ -395,7 +424,7 @@ class Calibrator:
                 for referrer_addr in refs[:64]:
                     for class_desc_off in CLASS_DESC_OFFSETS:
                         instance = referrer_addr - class_desc_off
-                        if not is_valid_user_pointer(instance):
+                        if not is_valid_user_pointer(instance) or instance in seen_instances:
                             continue
                         table = {
                             "ClassDescriptor": class_desc_off,
@@ -403,21 +432,24 @@ class Calibrator:
                         }
                         if inline:
                             table["ClassNameInline"] = 1
+                        if hop:
+                            table["ClassNameToString"] = hop
                         children = self._find_children_offset(instance, table)
                         if children is None:
                             continue
+                        count = children.pop("_count", 0)
                         table.update(children)
-
-                        # The client runs two DataModels: the Roblox app shell
-                        # ("LuaApp", PlaceId 0) and the game itself. Both pass
-                        # the structural test; insist on the one in the place
-                        # the caller expects, keeping the other as a fallback.
-                        if place_id and not self._contains_place_id(instance, place_id):
-                            if fallback is None:
-                                fallback = (dict(table), instance)
-                            continue
-                        return table, instance
-        return fallback
+                        seen_instances.add(instance)
+                        self.matches_log.append(
+                            f"verified DataModel candidate {hex(instance)}: {count} children, "
+                            + ", ".join(f"{k}={hex(v)}" for k, v in table.items()))
+                        if place_id and self._contains_place_id(instance, place_id):
+                            return table, instance
+                        matches.append((count, table, instance))
+        if not matches:
+            return None
+        count, table, instance = max(matches, key=lambda m: m[0])
+        return table, instance
 
     def _contains_place_id(self, instance: int, place_id: int) -> bool:
         blob = self.mem.read(instance, GUI_FIELD_WINDOW)
@@ -430,7 +462,8 @@ class Calibrator:
         if not is_valid_user_pointer(desc):
             return ""
         inline = bool(table.get("ClassNameInline"))
-        key = (desc, table["ClassDescriptorToClassName"], inline)
+        hop = table.get("ClassNameToString", 0)
+        key = (desc, table["ClassDescriptorToClassName"], inline, hop)
         cached = self._name_cache.get(key)
         if cached is not None:
             return cached
@@ -440,6 +473,7 @@ class Calibrator:
             name_ptr = self.mem.u64(desc + table["ClassDescriptorToClassName"])
             if not is_valid_user_pointer(name_ptr):
                 return ""
+            name_ptr += hop
         name = self._read_sso(name_ptr)
         if len(self._name_cache) < 200000:
             self._name_cache[key] = name
@@ -479,13 +513,35 @@ class Calibrator:
                     if found is None:
                         continue
                     if "Workspace" in found and "Players" in found:
-                        out = {"Children": off}
+                        parent_off = self._shared_parent_offset(
+                            instance, found["Workspace"], found["Players"])
+                        if parent_off is None:
+                            self.near_misses.append((len(found), (
+                                f"REJECTED (children don't point back) instance {hex(instance)} "
+                                f"ClassDescriptor={hex(table['ClassDescriptor'])} "
+                                f"ClassName={hex(table['ClassDescriptorToClassName'])} "
+                                f"children@{hex(off)}{' inline' if inline else ''} stride {stride}")))
+                            continue
+                        # Every entry of a real child list points back at its
+                        # parent. A span that merely sweeps across memory
+                        # containing the real children also catches junk.
+                        kids = [struct.unpack_from("<Q", entries, i * stride)[0]
+                                for i in range((end - start) // stride)]
+                        kids = [k for k in kids if k]
+                        backed = sum(1 for k in kids if self.mem.u64(k + parent_off) == instance)
+                        if backed < 2 or backed < len(kids) * 0.9:
+                            self.near_misses.append((backed, (
+                                f"REJECTED (only {backed}/{len(kids)} entries are children) "
+                                f"instance {hex(instance)} children@{hex(off)}"
+                                f"{' inline' if inline else ''} stride {stride}")))
+                            continue
+                        out = {"Children": off, "Parent": parent_off, "_count": backed}
                         if inline:
                             out["ChildrenInline"] = 1
                         if stride != 0x10:
                             out["ChildStride"] = stride
                         return out
-                    named = sorted(n for n in found if n)
+                    named = sorted(found)
                     if len(named) >= 3:
                         self.near_misses.append((len(named), (
                             f"instance {hex(instance)} ClassDescriptor={hex(table['ClassDescriptor'])} "
@@ -499,18 +555,32 @@ class Calibrator:
         return None
 
     def _child_classes(self, entries: bytes, stride: int, table: dict):
-        """Class names of the entries, or None if the first few don't decode."""
+        """{class name: first child of that class}, or None if nothing decodes."""
         count = len(entries) // stride
-        names = set()
+        names: dict[str, int] = {}
         for i in range(count):
             child = struct.unpack_from("<Q", entries, i * stride)[0]
             if not is_valid_user_pointer(child):
                 continue
-            names.add(self._class_name_at(child, table))
+            name = self._class_name_at(child, table)
+            if name:
+                names.setdefault(name, child)
             # Cheap reject: random pointer pairs almost never decode at all.
-            if i == 7 and not any(names):
+            if i == 7 and not names:
                 return None
-        return names if any(names) else None
+        return names or None
+
+    def _shared_parent_offset(self, instance: int, a: int, b: int):
+        """An offset where both children store a pointer back to `instance`."""
+        blob_a = self.mem.read(a, INSTANCE_FIELD_WINDOW)
+        blob_b = self.mem.read(b, INSTANCE_FIELD_WINDOW)
+        if not blob_a or not blob_b:
+            return None
+        needle = struct.pack("<Q", instance)
+        for off in range(0, INSTANCE_FIELD_WINDOW, 8):
+            if blob_a[off:off + 8] == needle and blob_b[off:off + 8] == needle:
+                return off
+        return None
 
     # -- diagnostics ------------------------------------------------------
 
@@ -1085,6 +1155,25 @@ class Calibrator:
                 result.log(f"TextLabelText = {hex(off)} (predicted, unverified)")
 
 
+def is_real_data_model(reader: RobloxReader, offsets: Offsets, instance: int) -> bool:
+    """A DataModel whose Workspace and Players children point back at it.
+
+    The back-pointer check rejects look-alikes such as the macOS class-name
+    registry, which also "contains" Workspace and Players.
+    """
+    if reader.read_class_name(instance) != "DataModel":
+        return False
+    found = {}
+    for child in reader.read_children(instance):
+        found.setdefault(reader.read_class_name(child), child)
+    if "Workspace" not in found or "Players" not in found:
+        return False
+    if not offsets.has("Parent"):
+        return True
+    return all(reader.ptr(found[c] + offsets["Parent"]) == instance
+               for c in ("Workspace", "Players"))
+
+
 def calibrate(mem: ProcessMemory, place_id: int = 0, progress=None) -> CalibrationResult:
     return Calibrator(mem, progress=progress).run(place_id=place_id)
 
@@ -1121,10 +1210,12 @@ def locate_data_model(
 
     class_desc_off = offsets.get("ClassDescriptor")
     class_name_off = offsets.get("ClassDescriptorToClassName")
+    hop = offsets.get("ClassNameToString", 0)
     if offsets.get("ClassNameInline"):
         name_fields = list(strings)  # the string lives inside the descriptor
     else:
-        name_fields = [h for h, _ in cal.find_qwords_in([(s, s + 1) for s in strings], limit=256)]
+        name_fields = [h for h, _ in cal.find_qwords_in(
+            [(s - hop, s - hop + 1) for s in strings], limit=256)]
     if not name_fields:
         return 0
     # Descriptor bases implied by the known ClassName offset -- exact values, so
@@ -1135,10 +1226,7 @@ def locate_data_model(
         return 0
 
     def confirm(instance: int) -> bool:
-        if reader.read_class_name(instance) != "DataModel":
-            return False
-        classes = {reader.read_class_name(c) for c in reader.read_children(instance)}
-        return "Workspace" in classes and "Players" in classes
+        return is_real_data_model(reader, offsets, instance)
 
     # Only a handful of exact target values here, so this is the fast path.
     candidates = []
