@@ -1,0 +1,4 @@
+# Window toolkit (the "Essentials" wheel is a fraction of full PySide6's size)
+PySide6-Essentials>=6.6
+# Makes calibration take seconds instead of minutes
+numpy>=1.24

@@ -1,0 +1,10 @@
+#!/bin/bash
+# XTernal for Mac -- launcher. Usage: ./xternal-mac [doctor|calibrate|report|dump|permissions]
+DIR="$(cd "$(dirname "$0")" && pwd)"
+PY="$DIR/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+    echo "XTernal isn't installed yet. Run XTernal.command first:"
+    echo "    double-click XTernal.command (or: bash \"$DIR/XTernal.command\")"
+    exit 1
+fi
+exec "$PY" "$DIR/run.py" "$@"
