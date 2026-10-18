@@ -31,54 +31,49 @@ xattr -dr com.apple.quarantine "$HERE" 2>/dev/null || true
 chmod +x "$HERE/xternal-mac" "$HERE/run.py" "$HERE/XTernal.command" "$HERE/install.sh" 2>/dev/null
 echo "ok"
 
-say "Looking for Python 3.10 or newer"
-PY=""
-CANDIDATES=""
-for v in 3.13 3.12 3.11 3.10 3.14; do
-    CANDIDATES="$CANDIDATES /Library/Frameworks/Python.framework/Versions/$v/bin/python$v"
-    CANDIDATES="$CANDIDATES /opt/homebrew/bin/python$v /usr/local/bin/python$v"
-done
-CANDIDATES="$CANDIDATES /opt/homebrew/bin/python3 /usr/local/bin/python3"
-# Apple's /usr/bin/python3 is only real once the Command Line Tools exist;
-# otherwise running it pops an install dialog, so only try it in that case.
-if xcode-select -p >/dev/null 2>&1; then
-    CANDIDATES="$CANDIDATES /usr/bin/python3"
+say "Getting a private copy of Python (nothing to click, no password)"
+# uv (astral.sh) is one small program that downloads a ready-made Python into
+# this folder and installs packages into it. Nothing is installed system-wide:
+# delete the folder and it's all gone.
+case "${XTERNAL_UV_ASSET:-$(uname -m)}" in
+    arm64)   UV_ASSET="aarch64-apple-darwin" ;;
+    x86_64)  UV_ASSET="x86_64-apple-darwin" ;;
+    *-*)     UV_ASSET="$XTERNAL_UV_ASSET" ;;   # testing override
+    *)       fail "unknown Mac processor type: $(uname -m)" ;;
+esac
+UV="$HERE/.uv/uv"
+if ! "$UV" --version >/dev/null 2>&1; then
+    rm -rf "$HERE/.uv"
+    mkdir -p "$HERE/.uv"
+    curl -fsSL "https://github.com/astral-sh/uv/releases/latest/download/uv-$UV_ASSET.tar.gz" \
+        -o "$HERE/.uv/uv.tar.gz" \
+        || fail "could not download the Python tools (check your internet connection)."
+    tar -xzf "$HERE/.uv/uv.tar.gz" -C "$HERE/.uv" --strip-components 1 \
+        || fail "the Python tools download was damaged. Run XTernal again."
+    rm -f "$HERE/.uv/uv.tar.gz"
 fi
-for p in $CANDIDATES; do
-    [ -x "$p" ] || continue
-    if "$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
-        PY="$p"
-        break
-    fi
-    echo "  skipping $p ($("$p" --version 2>&1)) -- too old"
-done
+"$UV" --version || fail "the Python tools won't run on this Mac."
 
-if [ -z "$PY" ]; then
-    echo
-    echo "No suitable Python found. Install it (one time, ~2 minutes):"
-    echo "  1. A web page is opening: python.org's Mac downloads."
-    echo "  2. Download the latest 'macOS 64-bit universal2 installer' for Python 3.13."
-    echo "  3. Open the downloaded .pkg and click Continue/Install until it's done."
-    echo "  4. Run XTernal again."
-    open "https://www.python.org/downloads/macos/" 2>/dev/null
-    fail "Python 3.10+ is not installed yet (see steps above)."
-fi
-echo "using $PY ($("$PY" --version 2>&1))"
+# Keep uv's Python and cache inside this folder, and never use a system Python
+# (whatever is or isn't installed on the Mac can't break this).
+export UV_PYTHON_INSTALL_DIR="$HERE/.python"
+export UV_CACHE_DIR="$HERE/.uv/cache"
+export UV_PYTHON_PREFERENCE="only-managed"
+export UV_NO_CONFIG=1
 
 say "Creating the private Python environment (.venv)"
-if [ -x "$HERE/.venv/bin/python" ] && ! "$HERE/.venv/bin/python" -c 'import sys' 2>/dev/null; then
+if [ -e "$HERE/.venv" ] && ! "$HERE/.venv/bin/python" -c 'import sys' 2>/dev/null; then
     echo "existing .venv is broken -- rebuilding"
     rm -rf "$HERE/.venv"
 fi
 if [ ! -x "$HERE/.venv/bin/python" ]; then
-    "$PY" -m venv "$HERE/.venv" || fail "could not create the Python environment."
+    "$UV" venv --python 3.12 "$HERE/.venv" \
+        || fail "could not set up Python (check your internet connection)."
 fi
-echo "ok"
+"$HERE/.venv/bin/python" --version
 
 say "Installing PySide6 + numpy (first time downloads ~100 MB)"
-"$HERE/.venv/bin/python" -m pip install --upgrade pip --disable-pip-version-check -q \
-    || echo "(pip self-update failed; continuing)"
-"$HERE/.venv/bin/python" -m pip install --disable-pip-version-check -r "$HERE/requirements.txt" \
+"$UV" pip install --python "$HERE/.venv/bin/python" -r "$HERE/requirements.txt" \
     || fail "could not install the Python packages (check your internet connection)."
 
 say "Checking the install"

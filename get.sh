@@ -3,8 +3,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/avezz1234/MacMacro/main/get.sh | bash
 #
-# Downloads the latest version into ~/XTernal (keeping the installed Python
-# environment, so updates are quick), puts an "XTernal" launcher on the
+# Downloads the latest version into ~/XTernal (keeping the private Python
+# and packages, so updates are quick), puts an "XTernal" launcher on the
 # Desktop, and runs it. Running the same line again updates and starts it.
 #
 # Paste ONLY the curl line above into Terminal -- not the contents of this file.
@@ -37,7 +37,8 @@ main() {
         || die "Download looks wrong; stopping before copying anything."
     [ -n "$HOME" ] && [ "$DEST" = "$HOME/XTernal" ] || die "Unexpected install folder; stopping."
     mkdir -p "$DEST"
-    rsync -a --delete --exclude ".venv" --exclude "install.log" "$SRC/" "$DEST/" \
+    rsync -a --delete --exclude ".venv" --exclude ".python" --exclude ".uv" \
+        --exclude "install.log" "$SRC/" "$DEST/" \
         || die "Couldn't copy files into $DEST."
     chmod +x "$DEST/XTernal.command" "$DEST/xternal-mac" "$DEST/run.py" "$DEST/install.sh"
 

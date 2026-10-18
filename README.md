@@ -34,8 +34,6 @@ That's it. **After the first time, double-click `XTernal` on your Desktop.**
 
 ### What it will ask you to do (first time only)
 
-- **Install Python**, if the Mac doesn't have it. A web page opens; download the
-  "macOS 64-bit universal2 installer", open it, click through, then run XTernal again.
 - **Switch on "Terminal"** in two Settings pages that it opens for you
   (*Accessibility* and *Input Monitoring*).
 - **Unlock Roblox's memory.** This is a one-time restart into the Mac's recovery
@@ -88,7 +86,11 @@ folders of the repo root.
 Desktop launcher. Then [`XTernal.command`](XTernal.command):
 
 1. runs `install.sh` if `.venv` is missing, broken, or older than
-   `requirements.txt`;
+   `requirements.txt`. The installer needs nothing pre-installed: it downloads
+   [uv](https://github.com/astral-sh/uv) into `.uv/`, which fetches a
+   standalone CPython 3.12 into `.python/` and installs the requirements into
+   `.venv/`. System Pythons are ignored (`UV_PYTHON_PREFERENCE=only-managed`),
+   and `get.sh` never deletes those three folders when updating;
 2. runs `run.py preflight` as the normal user (`xternal/preflight.py`). It
    checks SIP, then Accessibility, then Input Monitoring. It stops with
    step-by-step instructions for SIP; for the two permissions it opens the
