@@ -261,6 +261,10 @@ def main(argv=None) -> int:
     _elevate(command)
 
     setup(console=True)
+    try:
+        cfg.fix_ownership()  # repair anything an older version left root-owned
+    except Exception:
+        pass
     atexit.register(cfg.fix_ownership)
     log = get_logger()
     write_session_header(log, command)

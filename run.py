@@ -5,6 +5,10 @@
 import os
 import sys
 
+# The macro runs as root; any .pyc it wrote here would be root-owned and block
+# the updater (which runs as the normal user) from replacing files.
+sys.dont_write_bytecode = True
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from xternal.cli import main
 

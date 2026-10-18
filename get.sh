@@ -36,10 +36,30 @@ main() {
     [ -n "$SRC" ] && [ -d "$SRC" ] && [ -f "$SRC/XTernal.command" ] \
         || die "Download looks wrong; stopping before copying anything."
     [ -n "$HOME" ] && [ "$DEST" = "$HOME/XTernal" ] || die "Unexpected install folder; stopping."
-    mkdir -p "$DEST"
-    rsync -a --delete --exclude ".venv" --exclude ".python" --exclude ".uv" \
-        --exclude "install.log" "$SRC/" "$DEST/" \
-        || die "Couldn't copy files into $DEST."
+    # Swap folders instead of syncing in place. Files the macro created while
+    # running as root can sit inside the old copy; a sync can't delete them,
+    # but renaming the folder only needs permission on the home folder. The
+    # macro removes leftover XTernal.old-* folders itself the next time it
+    # runs as root.
+    NEWDIR="$DEST.new-$$"
+    cp -R "$SRC" "$NEWDIR" || die "Couldn't copy files. Send a screenshot of this window."
+    if [ -d "$DEST" ]; then
+        for keep in .venv .python .uv; do
+            if [ -e "$DEST/$keep" ]; then
+                mv "$DEST/$keep" "$NEWDIR/$keep" \
+                    || die "Couldn't move $keep. Send a screenshot of this window."
+            fi
+        done
+        OLD="$DEST.old-$(date +%s)"
+        if ! mv "$DEST" "$OLD"; then
+            for keep in .venv .python .uv; do      # put things back as they were
+                [ -e "$NEWDIR/$keep" ] && mv "$NEWDIR/$keep" "$DEST/$keep"
+            done
+            die "Couldn't replace the old version. Send a screenshot of this window."
+        fi
+        rm -rf "$OLD" 2>/dev/null || true
+    fi
+    mv "$NEWDIR" "$DEST" || die "Couldn't finish installing. Send a screenshot of this window."
     chmod +x "$DEST/XTernal.command" "$DEST/xternal-mac" "$DEST/run.py" "$DEST/install.sh"
 
     # A launcher on the Desktop: fetches the newest get.sh (so every launch is

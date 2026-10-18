@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import shutil
 from pathlib import Path
 
 APP_NAME = "xternal-mac"
@@ -110,17 +111,38 @@ def give_back(path) -> None:
         pass
 
 
+#: The folder this copy of the macro is installed in (~/XTernal normally).
+INSTALL_DIR = Path(__file__).resolve().parent.parent
+
+
 def fix_ownership() -> None:
-    """Hand every file under the macro's own folders back to the real user."""
+    """Hand files the macro created as root back to the real user.
+
+    Covers the settings/log folders and the install folder itself (including
+    .venv, where importing packages as root can leave root-owned caches that
+    would otherwise block every later update). Only root-owned entries are
+    touched, and symlinks are changed themselves, never followed.
+    """
     if os.geteuid() != 0:
         return
-    for root in (config_dir(), log_dir()):
+    _name, uid, gid, _home = real_user()
+    if uid == 0:
+        return
+    # Old copies the updater set aside (it can't delete root-owned files).
+    prefix = INSTALL_DIR.name + ".old-"
+    for old in INSTALL_DIR.parent.glob(prefix + "*"):
+        if old.is_dir() and not old.is_symlink() and old.name[len(prefix):].isdigit():
+            shutil.rmtree(old, ignore_errors=True)
+    for root in (config_dir(), log_dir(), INSTALL_DIR):
         if not root.exists():
             continue
-        give_back(root)
         for dirpath, dirnames, filenames in os.walk(root):
-            for name in dirnames + filenames:
-                give_back(os.path.join(dirpath, name))
+            for path in [dirpath] + [os.path.join(dirpath, n) for n in dirnames + filenames]:
+                try:
+                    if os.lstat(path).st_uid == 0:
+                        os.lchown(path, uid, gid)
+                except OSError:
+                    pass
 
 
 def ensure_dirs() -> None:
